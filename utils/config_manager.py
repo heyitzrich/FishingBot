@@ -110,6 +110,13 @@ def _require_number(cfg: Dict[str, Any], key: str, min_value: Optional[float] = 
     return num
 
 
+def _require_bool(cfg: Dict[str, Any], key: str) -> bool:
+    value = cfg.get(key)
+    if not isinstance(value, bool):
+        raise ConfigError(f"Missing or invalid boolean '{key}' value.")
+    return value
+
+
 def validate_config(cfg: Dict[str, Any]) -> None:
     game = _require_section(cfg, "game")
     detection = _require_section(cfg, "detection")
@@ -127,6 +134,12 @@ def validate_config(cfg: Dict[str, Any]) -> None:
     mode = _require_str(detection, "mode").lower()
     if mode not in {"red", "blue"}:
         raise ConfigError("'detection.mode' must be 'red' or 'blue'.")
+    detector_order = _require_str(detection, "detector_order").lower()
+    if detector_order not in {"template_first", "color_first"}:
+        raise ConfigError(
+            "'detection.detector_order' must be 'template_first' or 'color_first'."
+        )
+    _require_bool(detection, "auto_mode_fallback")
 
     search_region = _require_section(detection, "search_region")
     for name in ("left_frac", "top_frac", "width_frac", "height_frac"):

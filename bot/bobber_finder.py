@@ -1,12 +1,12 @@
 """
 Bobber finder using OpenCV connected-components analysis.
 
-Improvement over the original C# approach:
+Improvements:
   - cv2.connectedComponentsWithStats replaces a manual pixel-scoring loop
   - Accurate centroid via component statistics, not just "first match"
-  - Restricts search area to a tight radius around the last known position
-    for faster tracking after the initial lock-on
-  - Logs a warning when a scan exceeds 200ms (same threshold as the original)
+  - Restricts search area around the last known position for faster tracking
+  - Optional automatic red/blue mode fallback when the configured mode misses
+  - Logs a warning when a scan exceeds 200ms
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from bot.pixel_classifier import PixelClassifier
-from utils.screen import capture_region, bitmap_to_screen_coords
+from bot.pixel_classifier import ClassifierMode, PixelClassifier
 from utils.logger import get_logger
+from utils.screen import bitmap_to_screen_coords, capture_region
 
 logger = get_logger()
 
@@ -48,9 +48,41 @@ class BobberFinder:
         self._region = region
         self._min_pixels: int = cfg["min_cluster_pixels"]
         self._max_pixels: int = cfg["max_total_pixels"]
-        # Use 4× cluster_radius for the tracking window — wide enough to
-        # follow the bobber as it bobs, tight enough to exclude false positives
+        self._detector_order: str = str(
+            cfg.get("detector_order", "template_first")
+        ).strip().lower()
+
+        self._primary_mode: str = classifier.mode.value
+        self._auto_mode_fallback: bool = bool(cfg.get("auto_mode_fallback", True))
+        self._auto_mode_warned = False
+        self._alt_classifier: Optional[PixelClassifier] = None
+        self._alt_mode: Optional[str] = None
+        if self._auto_mode_fallback:
+            alt_mode = (
+                ClassifierMode.BLUE
+                if classifier.mode == ClassifierMode.RED
+                else ClassifierMode.RED
+            )
+            self._alt_classifier = PixelClassifier(alt_mode, cfg)
+            self._alt_mode = alt_mode.value
+
+        # Initial lock hardening to avoid selecting tiny nameplate fragments.
+        self._initial_min_pixels: int = int(
+            cfg.get("initial_lock_min_cluster_pixels", max(self._min_pixels, 8))
+        )
+        self._initial_center_penalty: float = float(
+            cfg.get("initial_lock_center_penalty", 12.0)
+        )
+        self._initial_target_y_frac: float = float(
+            cfg.get("initial_lock_target_y_frac", 0.42)
+        )
+        self._initial_text_aspect_threshold: float = float(
+            cfg.get("initial_lock_text_aspect_threshold", 2.6)
+        )
+
+        # Use 4x cluster_radius for the tracking window.
         self._track_radius: int = cfg["cluster_radius"] * 4
+
         self._template_enabled: bool = bool(
             cfg.get("template_fallback", {}).get("enabled", False)
         )
@@ -61,10 +93,11 @@ class BobberFinder:
         self._template_shape: Optional[Tuple[int, int]] = None  # (h, w)
         self._template_warned = False
         self._load_template(cfg)
+        logger.info("Detection order: %s", self._detector_order)
 
         self._last_bmp_pos: Optional[Tuple[int, int]] = None
-        self._last_frame:   Optional[np.ndarray] = None
-        self._last_mask:    Optional[np.ndarray] = None
+        self._last_frame: Optional[np.ndarray] = None
+        self._last_mask: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -79,59 +112,63 @@ class BobberFinder:
         """
         t0 = time.perf_counter()
 
+        had_previous_lock = self._last_bmp_pos is not None
         frame = capture_region(self._region)
-        mask  = self._classifier.apply_mask(frame)
-
-        # Cache frames for the debug overlay in main.py
         self._last_frame = frame
-        self._last_mask  = mask
+        self._last_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
 
-        search_mask = self._restrict_to_last(mask)
+        # Tracking phase favors color first for more reliable movement/bite updates.
+        if had_previous_lock:
+            color_first = self._find_with_color_modes(frame)
+            if color_first is not None:
+                self._warn_if_slow(t0)
+                return color_first
 
-        total = cv2.countNonZero(search_mask)
+            template_fallback = self._find_with_template(frame)
+            if template_fallback is not None:
+                self._last_bmp_pos = template_fallback
+                self._warn_if_slow(t0)
+                return bitmap_to_screen_coords(
+                    template_fallback[0], template_fallback[1], self._region
+                )
+        elif self._detector_order == "template_first":
+            template_first = self._find_with_template(frame)
+            if template_first is not None:
+                self._last_bmp_pos = template_first
+                self._warn_if_slow(t0)
+                return bitmap_to_screen_coords(
+                    template_first[0], template_first[1], self._region
+                )
 
-        if total == 0:
-            fallback = self._find_with_template(frame)
-            if fallback is not None:
-                self._last_bmp_pos = fallback
-                return bitmap_to_screen_coords(fallback[0], fallback[1], self._region)
-            self._last_bmp_pos = None
-            return None
+            color_fallback = self._find_with_color_modes(frame)
+            if color_fallback is not None:
+                self._warn_if_slow(t0)
+                return color_fallback
+        else:
+            color_first = self._find_with_color_modes(frame)
+            if color_first is not None:
+                self._warn_if_slow(t0)
+                return color_first
 
-        if total > self._max_pixels:
-            logger.warning(
-                f"Too many matching pixels ({total}) — color thresholds may be "
-                "too broad. Narrow the HSV ranges in config.yaml."
-            )
-            fallback = self._find_with_template(frame)
-            if fallback is not None:
-                self._last_bmp_pos = fallback
-                return bitmap_to_screen_coords(fallback[0], fallback[1], self._region)
-            self._last_bmp_pos = None
-            return None
+            template_fallback = self._find_with_template(frame)
+            if template_fallback is not None:
+                self._last_bmp_pos = template_fallback
+                self._warn_if_slow(t0)
+                return bitmap_to_screen_coords(
+                    template_fallback[0], template_fallback[1], self._region
+                )
 
-        result = self._find_best_component(search_mask)
-        if result is None:
-            fallback = self._find_with_template(frame)
-            if fallback is not None:
-                self._last_bmp_pos = fallback
-                return bitmap_to_screen_coords(fallback[0], fallback[1], self._region)
-
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        if elapsed_ms > 200:
-            logger.warning(f"BobberFinder scan took {elapsed_ms:.0f}ms (threshold: 200ms)")
-
-        return result
+        self._last_bmp_pos = None
+        self._warn_if_slow(t0)
+        return None
 
     def reset(self) -> None:
-        """Clear the cached position. Call after each cast so the finder
-        performs a full-frame search for the new bobber position."""
+        """Clear the cached position before a new cast."""
         self._last_bmp_pos = None
 
     @property
     def last_bitmap_pos(self) -> Optional[Tuple[int, int]]:
-        """Last bobber position in bitmap (capture-region) coordinates.
-        Used by the debug overlay to draw the reticle."""
+        """Last bobber position in capture-region coordinates."""
         return self._last_bmp_pos
 
     @property
@@ -147,6 +184,11 @@ class BobberFinder:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _warn_if_slow(self, started_at: float) -> None:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        if elapsed_ms > 200:
+            logger.warning("BobberFinder scan took %.0fms (threshold: 200ms)", elapsed_ms)
 
     def _load_template(self, cfg: dict) -> None:
         """Load template image for optional matchTemplate fallback."""
@@ -169,8 +211,8 @@ class BobberFinder:
 
         if not template_path.exists():
             logger.warning(
-                f"Template fallback image not found: {template_path}. "
-                "Fallback is disabled."
+                "Template fallback image not found: %s. Fallback is disabled.",
+                template_path,
             )
             self._template_enabled = False
             return
@@ -178,8 +220,8 @@ class BobberFinder:
         tpl = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
         if tpl is None or tpl.size == 0:
             logger.warning(
-                f"Template fallback failed to load image: {template_path}. "
-                "Fallback is disabled."
+                "Template fallback failed to load image: %s. Fallback is disabled.",
+                template_path,
             )
             self._template_enabled = False
             return
@@ -195,8 +237,7 @@ class BobberFinder:
     def _restrict_to_last(self, mask: np.ndarray) -> np.ndarray:
         """
         If we have a cached bobber position, zero out everything outside a
-        radius around it. Falls back to the full mask if the restricted
-        region has fewer than min_cluster_pixels hits.
+        radius around it. Falls back to full mask when too few pixels remain.
         """
         if self._last_bmp_pos is None:
             return mask
@@ -211,9 +252,54 @@ class BobberFinder:
         roi[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
 
         if cv2.countNonZero(roi) < self._min_pixels:
-            return mask  # fall back to full-frame search
+            return mask
 
         return roi
+
+    def _find_with_color_modes(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int]]:
+        """Try primary color mode, then optional opposite color fallback mode."""
+        mask = self._classifier.apply_mask(frame_bgr)
+        self._last_mask = mask
+
+        result = self._find_with_color_mask(mask, self._primary_mode)
+        if result is not None:
+            return result
+
+        if self._auto_mode_fallback and self._alt_classifier is not None and self._alt_mode:
+            alt_mask = self._alt_classifier.apply_mask(frame_bgr)
+            alt_result = self._find_with_color_mask(alt_mask, self._alt_mode)
+            if alt_result is not None:
+                self._last_mask = alt_mask
+                if not self._auto_mode_warned:
+                    logger.warning(
+                        "Configured detection.mode='%s' did not lock bobber, but '%s' did. "
+                        "Consider switching detection.mode to '%s'.",
+                        self._primary_mode,
+                        self._alt_mode,
+                        self._alt_mode,
+                    )
+                    self._auto_mode_warned = True
+                return alt_result
+
+        return None
+
+    def _find_with_color_mask(self, mask: np.ndarray, mode_name: str) -> Optional[Tuple[int, int]]:
+        """Find bobber from a classifier mask for one mode."""
+        search_mask = self._restrict_to_last(mask)
+        total = cv2.countNonZero(search_mask)
+
+        if total == 0:
+            return None
+
+        if total > self._max_pixels:
+            logger.warning(
+                "Too many '%s' matching pixels (%s). Narrow HSV thresholds.",
+                mode_name,
+                total,
+            )
+            return None
+
+        return self._find_best_component(search_mask)
 
     def _find_with_template(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int]]:
         """
@@ -252,7 +338,7 @@ class BobberFinder:
 
     def _find_best_component(self, mask: np.ndarray) -> Optional[Tuple[int, int]]:
         """
-        Run connected-components analysis and return the screen coordinates
+        Run connected-components analysis and return screen coordinates
         of the centroid of the largest cluster that meets the minimum size.
         """
         num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(
@@ -260,12 +346,40 @@ class BobberFinder:
         )
 
         best_label = -1
-        best_area  = 0
+        best_area = 0
+        best_score = float("-inf")
+        h, w = mask.shape[:2]
+
+        # Initial acquisition (after cast) is where false locks happen most.
+        is_initial_lock = self._last_bmp_pos is None
+        min_area = self._initial_min_pixels if is_initial_lock else self._min_pixels
+        target_x = w * 0.5
+        target_y = h * self._initial_target_y_frac
 
         for label in range(1, num_labels):  # label 0 = background
             area = int(stats[label, cv2.CC_STAT_AREA])
-            if area >= self._min_pixels and area > best_area:
-                best_area  = area
+            if area < min_area:
+                continue
+
+            score = float(area)
+            if is_initial_lock:
+                comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+                comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+                if comp_h > 0:
+                    aspect = comp_w / float(comp_h)
+                    if aspect >= self._initial_text_aspect_threshold and area < 50:
+                        continue
+
+                cx = float(centroids[label][0])
+                cy = float(centroids[label][1])
+                dx = (cx - target_x) / max(float(w), 1.0)
+                dy = (cy - target_y) / max(float(h), 1.0)
+                norm_dist = (dx * dx + dy * dy) ** 0.5
+                score -= norm_dist * self._initial_center_penalty
+
+            if score > best_score:
+                best_score = score
+                best_area = area
                 best_label = label
 
         if best_label == -1:
@@ -276,6 +390,6 @@ class BobberFinder:
         bmp_y = int(centroids[best_label][1])
         self._last_bmp_pos = (bmp_x, bmp_y)
 
-        logger.debug(f"Bobber at bitmap ({bmp_x}, {bmp_y}), cluster area={best_area}px")
+        logger.debug("Bobber at bitmap (%s, %s), cluster area=%spx", bmp_x, bmp_y, best_area)
 
         return bitmap_to_screen_coords(bmp_x, bmp_y, self._region)

@@ -35,6 +35,14 @@ class BotState(Enum):
     STOPPED   = auto()
 
 
+class WatchResult(Enum):
+    """Result of watching for a bite."""
+    BITE_DETECTED     = auto()  # Valid bite detected by watcher
+    BITE_TOO_LARGE    = auto()  # Bite detected but drop >= 100px (false positive)
+    BOBBER_VANISHED   = auto()  # Bobber lost during watch (timeout/tracking issue)
+    TIMEOUT           = auto()  # No bite within timeout period
+
+
 class SessionStats:
     """Tracks runtime statistics for the current fishing session."""
 
@@ -168,15 +176,29 @@ class FishBot:
                 logger.warning("Bobber not found after searching — recasting")
                 continue
 
-            bitten = self._do_watch()
-            if not bitten:
+            watch_result = self._do_watch()
+
+            # Handle different watch results
+            if watch_result == WatchResult.BITE_DETECTED:
+                # Valid bite - proceed to loot
+                self._do_loot()
+            elif watch_result == WatchResult.BITE_TOO_LARGE:
+                # False positive: drop >= 100px
+                self.stats.timeouts += 1
+                logger.info(
+                    f"False positive (large drop) — counting as miss | {self.stats}"
+                )
+            elif watch_result == WatchResult.BOBBER_VANISHED:
+                # False positive: bobber vanished without real bite
+                self.stats.timeouts += 1
+                logger.info(
+                    f"Bobber vanished (no bite) — counting as timeout/miss | {self.stats}"
+                )
+            else:  # WatchResult.TIMEOUT
                 self.stats.timeouts += 1
                 logger.info(
                     f"Timeout after {self._watcher._timeout:.0f}s — recasting | {self.stats}"
                 )
-                continue
-
-            self._do_loot()
 
     # ------------------------------------------------------------------
     # State handlers
@@ -207,38 +229,46 @@ class FishBot:
 
         return None
 
-    def _do_watch(self) -> bool:
+    def _do_watch(self) -> WatchResult:
         """
         Monitor the bobber until a bite is detected or the timeout expires.
 
-        Returns True if a bite was confirmed, False on timeout.
+        Returns a WatchResult indicating what happened during the watch phase.
         """
         self._set_state(BotState.WATCHING)
 
         if self._bobber_pos is None:
-            return False
+            return WatchResult.TIMEOUT
 
         self._watcher.reset(self._bobber_pos[1])
 
         while not self._watcher.is_timed_out():
             if self._stop_event.is_set():
-                return False
+                return WatchResult.TIMEOUT
 
             pos = self._finder.find()
 
             if pos is None:
-                # Bobber vanished — treat as bite (it sank or was looted by lag)
-                logger.debug("Bobber lost during watch — treating as bite")
-                return True
+                # Bobber vanished — this is a false positive (timeout or tracking lost)
+                logger.debug("Bobber lost during watch — treating as timeout/miss")
+                return WatchResult.BOBBER_VANISHED
 
             self._bobber_pos = pos
 
             if self._watcher.update(pos[1]):
-                return True
+                # Check if the drop was too large (>= 100px = false positive)
+                drop = self._watcher.detected_drop
+                if drop >= 100.0:
+                    logger.warning(
+                        f"Bite detected but drop too large ({drop:.1f}px >= 100px) — "
+                        f"treating as false positive/miss"
+                    )
+                    return WatchResult.BITE_TOO_LARGE
+                return WatchResult.BITE_DETECTED
 
             time.sleep(0.033)   # ~30 fps polling rate
 
-        return False
+        return WatchResult.TIMEOUT
 
     def _do_loot(self) -> None:
         self._set_state(BotState.LOOTING)

@@ -231,8 +231,19 @@ class App(ctk.CTk):
     def _get_preview_frame(self):
         if self._finder is None or self._finder.last_frame is None:
             return None
-        # Raw captured preview only (no debug overlays).
-        return self._finder.last_frame.copy()
+        # Raw captured preview with only a minimal detection marker.
+        frame = self._finder.last_frame.copy()
+        bmp_pos = self._finder.last_bitmap_pos
+        if bmp_pos is not None:
+            cx, cy = bmp_pos
+            half = 14
+            h, w = frame.shape[:2]
+            x1 = max(0, cx - half)
+            y1 = max(0, cy - half)
+            x2 = min(w - 1, cx + half)
+            y2 = min(h - 1, cy + half)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2, cv2.LINE_AA)
+        return frame
 
     def _drain_logs(self) -> None:
         for _ in range(50):

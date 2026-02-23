@@ -56,6 +56,7 @@ class BiteWatcher:
         self._last_tick:  float = 0.0
         self._y_window:   deque = deque(maxlen=_WINDOW_SIZE)
         self._triggered:  bool  = False
+        self._detected_drop: float = 0.0  # Track the actual drop amount when bite detected
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,6 +76,7 @@ class BiteWatcher:
         self._y_window.clear()
         self._y_window.append(initial_y)
         self._triggered  = False
+        self._detected_drop = 0.0
         logger.debug(
             f"BiteWatcher reset — initial_y={initial_y}, "
             f"strike={self._strike_value}px, timeout={self._timeout}s"
@@ -109,6 +111,7 @@ class BiteWatcher:
         )
 
         if drop >= self._strike_value:
+            self._detected_drop = drop  # Store the actual drop amount
             logger.info(
                 f"Bite detected! Median drop={drop:.1f}px "
                 f"(threshold={self._strike_value}px, "
@@ -133,6 +136,11 @@ class BiteWatcher:
     def triggered(self) -> bool:
         """True if a bite was already detected this cast."""
         return self._triggered
+
+    @property
+    def detected_drop(self) -> float:
+        """The actual drop amount in pixels when bite was detected (0 if no bite)."""
+        return self._detected_drop
 
     # ------------------------------------------------------------------
     # Private helpers

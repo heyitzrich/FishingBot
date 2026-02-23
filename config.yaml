@@ -1,0 +1,71 @@
+# =============================================================================
+# FishingBot Configuration
+# =============================================================================
+
+game:
+  # Process name to find the game window (used for focus/click targeting)
+  # Options: "Wow", "WowClassic", "Wow-64"
+  process_name: "Wow"
+
+  # Keybind you have fishing on in-game (number row, F-keys, etc.)
+  cast_key: "2"
+
+  # Optional: key(s) to press every ~10 minutes (e.g. apply lure, delete junk)
+  # Set to null to disable, or list multiple: ["3", "4"]
+  ten_min_keys: null
+
+detection:
+  # Color mode: "red" for standard feather bobber, "blue" for lava fishing
+  mode: "red"
+
+  # HSV thresholds for RED feather detection
+  # Red wraps around in HSV so we use two ranges
+  red:
+    lower1: [0,   120, 100]    # Hue 0-10 (red)
+    upper1: [10,  255, 255]
+    lower2: [170, 120, 100]    # Hue 170-180 (red wrap-around)
+    upper2: [180, 255, 255]
+
+  # HSV thresholds for BLUE feather (lava fishing)
+  blue:
+    lower: [100, 120, 100]
+    upper: [130, 255, 255]
+
+  # Screen region to scan (fractions of total screen size)
+  # Default: center 50% of screen, avoids UI edges
+  search_region:
+    left_frac:   0.25    # Start 25% from left
+    top_frac:    0.25    # Start 25% from top
+    width_frac:  0.50    # Scan 50% of screen width
+    height_frac: 0.45    # Scan ~45% of screen height
+
+  # Bobber cluster scoring
+  min_cluster_pixels: 3     # Ignore blobs smaller than this
+  max_total_pixels:   1000  # Too many pixels = misconfigured color, reject scan
+  cluster_radius:     10    # Pixels to consider "nearby" when scoring clusters
+
+bite:
+  # How many pixels the bobber must DROP to trigger a loot
+  strike_value: 7
+
+  # Seconds to wait for a bite before recasting
+  timeout_seconds: 25
+
+  # How often (ms) to emit a bobber-position event for charting
+  position_update_ms: 500
+
+timing:
+  post_cast_wait_ms:      2000   # Wait after casting before scanning
+  loot_delay_ms:          2000   # Delay between detecting bite and right-clicking
+  ten_min_interval_min:   10     # Minutes between ten-min key presses
+  random_jitter_ms:       225    # Max random extra ms added to delays (anti-pattern)
+
+debug:
+  # Show a live OpenCV window with what the bot is seeing
+  show_window: true
+
+  # Window update rate (ms) — lower = smoother but more CPU
+  window_refresh_ms: 100
+
+  # Logging verbosity: DEBUG, INFO, WARNING, ERROR
+  log_level: "INFO"

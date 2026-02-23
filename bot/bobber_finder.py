@@ -12,6 +12,7 @@ Improvement over the original C# approach:
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Optional, Tuple
 
 import cv2
@@ -50,6 +51,16 @@ class BobberFinder:
         # Use 4× cluster_radius for the tracking window — wide enough to
         # follow the bobber as it bobs, tight enough to exclude false positives
         self._track_radius: int = cfg["cluster_radius"] * 4
+        self._template_enabled: bool = bool(
+            cfg.get("template_fallback", {}).get("enabled", False)
+        )
+        self._template_threshold: float = float(
+            cfg.get("template_fallback", {}).get("match_threshold", 0.84)
+        )
+        self._template_bgr: Optional[np.ndarray] = None
+        self._template_shape: Optional[Tuple[int, int]] = None  # (h, w)
+        self._template_warned = False
+        self._load_template(cfg)
 
         self._last_bmp_pos: Optional[Tuple[int, int]] = None
         self._last_frame:   Optional[np.ndarray] = None
@@ -80,6 +91,10 @@ class BobberFinder:
         total = cv2.countNonZero(search_mask)
 
         if total == 0:
+            fallback = self._find_with_template(frame)
+            if fallback is not None:
+                self._last_bmp_pos = fallback
+                return bitmap_to_screen_coords(fallback[0], fallback[1], self._region)
             self._last_bmp_pos = None
             return None
 
@@ -88,10 +103,19 @@ class BobberFinder:
                 f"Too many matching pixels ({total}) — color thresholds may be "
                 "too broad. Narrow the HSV ranges in config.yaml."
             )
+            fallback = self._find_with_template(frame)
+            if fallback is not None:
+                self._last_bmp_pos = fallback
+                return bitmap_to_screen_coords(fallback[0], fallback[1], self._region)
             self._last_bmp_pos = None
             return None
 
         result = self._find_best_component(search_mask)
+        if result is None:
+            fallback = self._find_with_template(frame)
+            if fallback is not None:
+                self._last_bmp_pos = fallback
+                return bitmap_to_screen_coords(fallback[0], fallback[1], self._region)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         if elapsed_ms > 200:
@@ -124,6 +148,50 @@ class BobberFinder:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _load_template(self, cfg: dict) -> None:
+        """Load template image for optional matchTemplate fallback."""
+        if not self._template_enabled:
+            return
+
+        template_cfg = cfg.get("template_fallback", {})
+        template_path_raw = str(template_cfg.get("template_path", "")).strip()
+        if not template_path_raw:
+            logger.warning(
+                "Template fallback enabled but no template_path was provided; "
+                "fallback is disabled."
+            )
+            self._template_enabled = False
+            return
+
+        template_path = Path(template_path_raw)
+        if not template_path.is_absolute():
+            template_path = Path.cwd() / template_path
+
+        if not template_path.exists():
+            logger.warning(
+                f"Template fallback image not found: {template_path}. "
+                "Fallback is disabled."
+            )
+            self._template_enabled = False
+            return
+
+        tpl = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+        if tpl is None or tpl.size == 0:
+            logger.warning(
+                f"Template fallback failed to load image: {template_path}. "
+                "Fallback is disabled."
+            )
+            self._template_enabled = False
+            return
+
+        self._template_bgr = tpl
+        self._template_shape = tpl.shape[:2]
+        logger.info(
+            "Template fallback loaded: %s (threshold=%.2f)",
+            template_path,
+            self._template_threshold,
+        )
+
     def _restrict_to_last(self, mask: np.ndarray) -> np.ndarray:
         """
         If we have a cached bobber position, zero out everything outside a
@@ -146,6 +214,41 @@ class BobberFinder:
             return mask  # fall back to full-frame search
 
         return roi
+
+    def _find_with_template(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int]]:
+        """
+        Fallback detection using template matching.
+        Returns bitmap coordinates of match center, or None on no confident match.
+        """
+        if not self._template_enabled or self._template_bgr is None or self._template_shape is None:
+            return None
+
+        t_h, t_w = self._template_shape
+        f_h, f_w = frame_bgr.shape[:2]
+        if t_h > f_h or t_w > f_w:
+            if not self._template_warned:
+                logger.warning(
+                    "Template fallback image is larger than capture region; "
+                    "fallback will be skipped."
+                )
+                self._template_warned = True
+            return None
+
+        # Full-color template match so feather+bob colors contribute to confidence.
+        result = cv2.matchTemplate(frame_bgr, self._template_bgr, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val < self._template_threshold:
+            return None
+
+        center_x = int(max_loc[0] + t_w / 2)
+        center_y = int(max_loc[1] + t_h / 2)
+        logger.debug(
+            "Template fallback matched at bitmap (%s, %s), score=%.3f",
+            center_x,
+            center_y,
+            max_val,
+        )
+        return center_x, center_y
 
     def _find_best_component(self, mask: np.ndarray) -> Optional[Tuple[int, int]]:
         """

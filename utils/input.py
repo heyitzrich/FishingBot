@@ -103,11 +103,11 @@ def send_key(hwnd: int, key: str, jitter_ms: int = 225) -> None:
 
 def right_click(hwnd: int, screen_x: int, screen_y: int, jitter_ms: int = 225) -> None:
     """
-    Right-click at absolute screen coordinates, posting to WoW's window handle.
-    Does not require WoW to be in focus.
+    Right-click at coordinates purely via PostMessage — no real cursor movement.
 
-    Converts screen coords to WoW client-area coordinates, which is what
-    PostMessage WM_RBUTTONDOWN expects in lParam.
+    Sends WM_MOUSEMOVE first so WoW updates its internal hover target to the
+    bobber, then sends WM_RBUTTONDOWN/UP. The user's real cursor is never
+    touched.
 
     Args:
         hwnd:      WoW window handle.
@@ -118,6 +118,11 @@ def right_click(hwnd: int, screen_x: int, screen_y: int, jitter_ms: int = 225) -
     client_x, client_y = win32gui.ScreenToClient(hwnd, (screen_x, screen_y))
     l_param = win32api.MAKELONG(client_x, client_y)
 
+    # Move WoW's internal cursor to the bobber position
+    win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, l_param)
+    time.sleep(0.05)
+
+    # Right-click at that position
     win32api.PostMessage(hwnd, win32con.WM_RBUTTONDOWN, win32con.MK_RBUTTON, l_param)
     time.sleep(random.uniform(0.05, 0.1))
     win32api.PostMessage(hwnd, win32con.WM_RBUTTONUP, 0, l_param)

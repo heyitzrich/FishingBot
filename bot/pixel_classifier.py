@@ -11,7 +11,7 @@ Improvement over the original C# RGB approach:
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -48,7 +48,16 @@ class PixelClassifier:
             cfg:  The detection config dict from config.yaml
         """
         self.mode = mode
+        self._cfg = cfg
         self._ranges: List[HsvRange] = self._build_ranges(cfg)
+        self._blue_min_delta: int = int(cfg.get("blue", {}).get("blue_channel_min_delta", 20))
+        self._red_ranges: Optional[List[HsvRange]] = None
+        if self.mode == ClassifierMode.BLUE:
+            red_cfg = cfg["red"]
+            self._red_ranges = [
+                (red_cfg["lower1"], red_cfg["upper1"]),
+                (red_cfg["lower2"], red_cfg["upper2"]),
+            ]
         logger.debug(f"PixelClassifier mode={mode.value}, ranges={self._ranges}")
 
     # ------------------------------------------------------------------
@@ -74,6 +83,26 @@ class PixelClassifier:
             hi = np.array(upper, dtype=np.uint8)
             combined = cv2.bitwise_or(combined, cv2.inRange(hsv, lo, hi))
 
+        # Blue mode hardening:
+        #  1) Remove pixels matching red ranges
+        #  2) Keep only pixels where blue channel is meaningfully dominant
+        if self.mode == ClassifierMode.BLUE:
+            if self._red_ranges:
+                red_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+                for lower, upper in self._red_ranges:
+                    lo = np.array(lower, dtype=np.uint8)
+                    hi = np.array(upper, dtype=np.uint8)
+                    red_mask = cv2.bitwise_or(red_mask, cv2.inRange(hsv, lo, hi))
+                combined = cv2.bitwise_and(combined, cv2.bitwise_not(red_mask))
+
+            b = bgr_frame[:, :, 0].astype(np.int16)
+            g = bgr_frame[:, :, 1].astype(np.int16)
+            r = bgr_frame[:, :, 2].astype(np.int16)
+            max_rg = np.maximum(r, g)
+            dominant_blue = (b - max_rg) >= self._blue_min_delta
+            combined = combined.copy()
+            combined[~dominant_blue] = 0
+
         return combined
 
     def is_match(self, r: int, g: int, b: int) -> bool:
@@ -84,6 +113,19 @@ class PixelClassifier:
         pixel = np.array([[[b, g, r]]], dtype=np.uint8)  # OpenCV is BGR
         hsv = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0][0]
         h, s, v = int(hsv[0]), int(hsv[1]), int(hsv[2])
+
+        if self.mode == ClassifierMode.BLUE:
+            # Require blue channel dominance to reject red-ish or neutral pixels.
+            if (int(b) - max(int(r), int(g))) < self._blue_min_delta:
+                return False
+            if self._red_ranges:
+                for lower, upper in self._red_ranges:
+                    if (
+                        lower[0] <= h <= upper[0]
+                        and lower[1] <= s <= upper[1]
+                        and lower[2] <= v <= upper[2]
+                    ):
+                        return False
 
         for lower, upper in self._ranges:
             if lower[0] <= h <= upper[0] and lower[1] <= s <= upper[1] and lower[2] <= v <= upper[2]:

@@ -5,6 +5,7 @@ Usage:
     python main.py
     python main.py --mode blue          # override color detection mode
     python main.py --config custom.yaml # use a different config file
+    python main.py --gui                # launch CustomTkinter GUI
     python main.py --no-window          # headless mode, no OpenCV window
 
 The debug window (enabled via config.yaml debug.show_window) displays:
@@ -22,21 +23,19 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
-import time
 from pathlib import Path
-from typing import Optional, Tuple
 
 import cv2
-import numpy as np
 import yaml
 
 from bot.bobber_finder  import BobberFinder
 from bot.bite_watcher   import BiteWatcher
-from bot.fish_bot       import FishBot, BotState
+from bot.fish_bot       import FishBot
 from bot.pixel_classifier import ClassifierMode, PixelClassifier
+from gui.debug_overlay  import build_debug_frame
 from utils.input        import find_wow_window
 from utils.logger       import get_logger, setup_logger
-from utils.screen       import get_search_region
+from utils.screen       import get_search_region, init as init_screen
 
 # ------------------------------------------------------------------
 # Config
@@ -50,100 +49,35 @@ def load_config(path: str) -> dict:
     with p.open("r") as f:
         return yaml.safe_load(f)
 
-# ------------------------------------------------------------------
-# Debug window
-# ------------------------------------------------------------------
-
-# State label colors in BGR
-_STATE_COLORS = {
-    BotState.IDLE:      (200, 200, 200),
-    BotState.CASTING:   (  0, 200, 255),
-    BotState.SEARCHING: (255, 200,   0),
-    BotState.WATCHING:  (  0, 220,   0),
-    BotState.LOOTING:   (  0, 100, 255),
-    BotState.STOPPED:   (100, 100, 100),
-}
-
-
-def build_debug_frame(bot: FishBot, finder: BobberFinder) -> Optional[np.ndarray]:
-    """
-    Compose a debug display frame from the bot's most recent capture.
-
-    Layers (bottom to top):
-      1. Raw captured BGR frame
-      2. Semi-transparent red tint where the color mask fired
-      3. White L-bracket reticle around the bobber centroid
-      4. State badge (top-left)
-      5. Session stats (bottom)
-
-    Returns None if no frame has been captured yet.
-    """
-    frame = finder.last_frame
-    mask  = finder.last_mask
-    if frame is None or mask is None:
-        return None
-
-    display = frame.copy()
-
-    # -- Color mask overlay ------------------------------------------
-    overlay = np.zeros_like(display)
-    overlay[mask > 0] = (0, 0, 180)   # red in BGR
-    cv2.addWeighted(overlay, 0.35, display, 1.0, 0, display)
-
-    # -- Bobber reticle ----------------------------------------------
-    bmp_pos = finder.last_bitmap_pos
-    if bmp_pos is not None:
-        cx, cy = bmp_pos
-        arm = 20    # length of each reticle arm
-        stub = 8    # length of the short perpendicular leg
-        t    = 2    # line thickness
-        col  = (255, 255, 255)
-
-        for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
-            x, y = cx + dx * arm, cy + dy * arm
-            cv2.line(display, (x, y), (x - dx * stub, y),        col, t, cv2.LINE_AA)
-            cv2.line(display, (x, y), (x,              y - dy * stub), col, t, cv2.LINE_AA)
-
-    # -- State badge (top-left) --------------------------------------
-    state       = bot.state
-    state_color = _STATE_COLORS.get(state, (255, 255, 255))
-    label       = f"  {state.name}"
-    cv2.rectangle(display, (0, 0), (200, 26), (20, 20, 20), -1)
-    cv2.putText(display, label, (4, 19),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, state_color, 1, cv2.LINE_AA)
-
-    # -- Session stats (bottom) --------------------------------------
-    stats_lines = str(bot.stats).split(" | ")
-    bar_h = 20
-    for i, line in enumerate(stats_lines):
-        y = display.shape[0] - 8 - i * bar_h
-        cv2.rectangle(display, (0, y - bar_h + 4), (display.shape[1], y + 4),
-                      (20, 20, 20), -1)
-        cv2.putText(display, line, (6, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (210, 210, 210), 1, cv2.LINE_AA)
-
-    return display
-
-# ------------------------------------------------------------------
-# Entry point
-# ------------------------------------------------------------------
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Python WoW Fishing Bot")
     parser.add_argument("--config",    default="config.yaml",
                         help="Path to config YAML (default: config.yaml)")
     parser.add_argument("--mode",      choices=["red", "blue"],
                         help="Override detection.mode from config")
+    parser.add_argument("--gui",       action="store_true",
+                        help="Launch the CustomTkinter GUI")
     parser.add_argument("--no-window", action="store_true",
                         help="Disable the debug OpenCV window")
     args = parser.parse_args()
+
+    if args.gui:
+        from gui.app import App
+
+        try:
+            app = App(config_path=args.config, mode_override=args.mode)
+        except Exception as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            sys.exit(1)
+        app.mainloop()
+        return
 
     cfg = load_config(args.config)
     setup_logger(level=cfg["debug"]["log_level"])
     log = get_logger()
 
     # Resolve detection mode
-    mode_str = args.mode or cfg["detection"]["mode"]
+    mode_str = (args.mode or cfg["detection"]["mode"]).strip().lower()
     mode     = ClassifierMode.RED if mode_str == "red" else ClassifierMode.BLUE
     log.info(f"Detection mode: {mode.value.upper()}")
 
@@ -155,6 +89,7 @@ def main() -> None:
         sys.exit(1)
 
     # Build component graph
+    init_screen(hwnd)
     region     = get_search_region(cfg["detection"]["search_region"])
     classifier = PixelClassifier(mode, cfg["detection"])
     finder     = BobberFinder(classifier, region, cfg["detection"])

@@ -100,13 +100,17 @@ class FishBot:
         self._cast_key:        str       = game_cfg["cast_key"]
         self._ten_keys:        List[str] = game_cfg.get("ten_min_keys") or []
         self._ten_min_s:       float     = timing_cfg["ten_min_interval_min"] * 60.0
+        self._macro_1_wait_s:  float     = float(timing_cfg.get("macro_1_wait_s", 6.0))
+        self._macro_2_wait_s:  float     = float(timing_cfg.get("macro_2_wait_s", 6.0))
+        self._macro_default_wait_s: float = float(timing_cfg.get("macro_default_wait_s", 1.0))
         self._post_cast_s:     float     = timing_cfg["post_cast_wait_ms"] / 1000.0
         self._loot_delay_s:    float     = timing_cfg["loot_delay_ms"] / 1000.0
+        self._post_loot_s:    float     = timing_cfg["post_loot_wait_ms"] / 1000.0
         self._jitter_ms:       int       = timing_cfg["random_jitter_ms"]
 
         self._state:           BotState                    = BotState.IDLE
         self._bobber_pos:      Optional[Tuple[int, int]]   = None
-        self._last_ten_min:    float                       = time.perf_counter()
+        self._last_ten_min:    float                       = 0.0  # trigger immediately on first loop
         self._stop_event                                   = threading.Event()
 
         self.stats:            SessionStats                = SessionStats()
@@ -248,6 +252,9 @@ class FishBot:
         if pos is not None:
             right_click(self._hwnd, pos[0], pos[1], jitter_ms=self._jitter_ms)
 
+        # Wait for loot animation/pickup to finish before next cast
+        self._jittered_sleep(self._post_loot_s)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -261,10 +268,28 @@ class FishBot:
             return
 
         logger.info(f"10-min maintenance keys: {self._ten_keys}")
-        for key in self._ten_keys:
+        for idx, key in enumerate(self._ten_keys):
             send_key(self._hwnd, key, jitter_ms=self._jitter_ms)
-            time.sleep(random.uniform(0.5, 1.0))
-        self._last_ten_min = now
+            wait_s = self._get_macro_wait_s(idx)
+            if wait_s > 0:
+                logger.info(
+                    "Waiting %.1fs after Macro %s (%r).",
+                    wait_s,
+                    idx + 1,
+                    key,
+                )
+                time.sleep(wait_s)
+
+        # Start the next interval after maintenance sequence fully completes.
+        self._last_ten_min = time.perf_counter()
+
+    def _get_macro_wait_s(self, idx: int) -> float:
+        """Return per-macro delay in seconds after pressing each maintenance key."""
+        if idx == 0:
+            return max(0.0, self._macro_1_wait_s)
+        if idx == 1:
+            return max(0.0, self._macro_2_wait_s)
+        return max(0.0, self._macro_default_wait_s)
 
     def _jittered_sleep(self, base_s: float) -> None:
         """Sleep for base_s plus a random anti-pattern jitter."""

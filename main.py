@@ -2,7 +2,7 @@
 FishingBot — entry point.
 
 Usage:
-    python main.py
+    python main.py                      # auto-uses %APPDATA%\\FishingBot\\config.yaml
     python main.py --mode blue          # override color detection mode
     python main.py --config custom.yaml # use a different config file
     python main.py --gui                # launch CustomTkinter GUI
@@ -23,58 +23,58 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
-from pathlib import Path
 
 import cv2
-import yaml
 
 from bot.bobber_finder  import BobberFinder
 from bot.bite_watcher   import BiteWatcher
 from bot.fish_bot       import FishBot
 from bot.pixel_classifier import ClassifierMode, PixelClassifier
 from gui.debug_overlay  import build_debug_frame
+from utils.app_paths     import get_session_log_path, is_frozen
+from utils.config_manager import ConfigError, load_runtime_config
 from utils.input        import find_wow_window
 from utils.logger       import get_logger, setup_logger
 from utils.screen       import get_search_region, init as init_screen
 
-# ------------------------------------------------------------------
-# Config
-# ------------------------------------------------------------------
-
-def load_config(path: str) -> dict:
-    p = Path(path)
-    if not p.exists():
-        print(f"[ERROR] Config file not found: {path}", file=sys.stderr)
-        sys.exit(1)
-    with p.open("r") as f:
-        return yaml.safe_load(f)
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Python WoW Fishing Bot")
-    parser.add_argument("--config",    default="config.yaml",
-                        help="Path to config YAML (default: config.yaml)")
+    parser.add_argument("--config",    default=None,
+                        help="Path to config YAML (default: %%APPDATA%%\\FishingBot\\config.yaml)")
     parser.add_argument("--mode",      choices=["red", "blue"],
                         help="Override detection.mode from config")
     parser.add_argument("--gui",       action="store_true",
                         help="Launch the CustomTkinter GUI")
+    parser.add_argument("--cli",       action="store_true",
+                        help="Force legacy non-GUI mode (useful for debugging executable builds)")
     parser.add_argument("--no-window", action="store_true",
                         help="Disable the debug OpenCV window")
     args = parser.parse_args()
 
-    if args.gui:
+    try:
+        config_path, cfg = load_runtime_config(args.config)
+    except ConfigError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    log_file = get_session_log_path()
+    setup_logger(level=cfg["debug"]["log_level"], log_file=log_file)
+    log = get_logger()
+    log.info("Config path: %s", config_path)
+    log.info("Log file: %s", log_file)
+
+    launch_gui = args.gui or (is_frozen() and not args.cli and not args.no_window)
+
+    if launch_gui:
         from gui.app import App
 
         try:
-            app = App(config_path=args.config, mode_override=args.mode)
+            app = App(config_path=str(config_path), mode_override=args.mode, log_file=log_file)
         except Exception as exc:
             print(f"[ERROR] {exc}", file=sys.stderr)
             sys.exit(1)
         app.mainloop()
         return
-
-    cfg = load_config(args.config)
-    setup_logger(level=cfg["debug"]["log_level"])
-    log = get_logger()
 
     # Resolve detection mode
     mode_str = (args.mode or cfg["detection"]["mode"]).strip().lower()

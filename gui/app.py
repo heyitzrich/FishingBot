@@ -10,7 +10,6 @@ from typing import Optional
 
 import cv2
 import customtkinter as ctk
-import yaml
 
 from bot.bite_watcher import BiteWatcher
 from bot.bobber_finder import BobberFinder
@@ -24,6 +23,13 @@ from gui.frames import (
     StatsFrame,
 )
 from gui.log_handler import QueueHandler
+from utils.app_paths import get_session_log_path
+from utils.config_manager import (
+    load_runtime_config,
+    resolve_runtime_paths,
+    save_config,
+    validate_config,
+)
 from utils.input import find_wow_window
 from utils.logger import get_logger, setup_logger
 from utils.screen import get_search_region, init as init_screen
@@ -32,7 +38,12 @@ from utils.screen import get_search_region, init as init_screen
 class App(ctk.CTk):
     """Main GUI application."""
 
-    def __init__(self, config_path: str = "config.yaml", mode_override: Optional[str] = None):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        mode_override: Optional[str] = None,
+        log_file: Optional[Path] = None,
+    ):
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -42,12 +53,12 @@ class App(ctk.CTk):
         self.minsize(980, 620)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self._config_path = Path(config_path)
-        self._cfg = self._load_config(self._config_path)
+        self._config_path, self._cfg = load_runtime_config(config_path)
         if mode_override:
             self._cfg["detection"]["mode"] = mode_override
 
-        setup_logger(level=self._cfg["debug"]["log_level"])
+        self._log_file = log_file or get_session_log_path()
+        setup_logger(level=self._cfg["debug"]["log_level"], log_file=self._log_file)
         self._log = get_logger()
 
         self._log_queue: "queue.Queue[tuple[str, str]]" = queue.Queue(maxsize=5000)
@@ -254,10 +265,10 @@ class App(ctk.CTk):
             self.log_viewer.append(line, level)
 
     def _save_config(self, cfg: dict) -> None:
-        with self._config_path.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False)
-        self._cfg = cfg
-        setup_logger(level=self._cfg["debug"]["log_level"])
+        validate_config(cfg)
+        save_config(self._config_path, cfg)
+        self._cfg = resolve_runtime_paths(cfg, self._config_path)
+        setup_logger(level=self._cfg["debug"]["log_level"], log_file=self._log_file)
         self._log.info("Config saved to %s. Changes apply on next start.", self._config_path)
 
     def _set_preview_enabled(self, enabled: bool) -> None:
@@ -278,10 +289,3 @@ class App(ctk.CTk):
             self._log.removeHandler(self._queue_handler)
 
         self.destroy()
-
-    @staticmethod
-    def _load_config(path: Path) -> dict:
-        if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
-        with path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f)

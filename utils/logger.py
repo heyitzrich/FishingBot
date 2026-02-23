@@ -3,7 +3,9 @@ Logging setup with colored console output.
 """
 
 import logging
+from pathlib import Path
 import sys
+from typing import Optional
 
 try:
     import colorlog
@@ -12,7 +14,11 @@ except ImportError:
     HAS_COLORLOG = False
 
 
-def setup_logger(name: str = "FishingBot", level: str = "INFO") -> logging.Logger:
+def setup_logger(
+    name: str = "FishingBot",
+    level: str = "INFO",
+    log_file: Optional[Path] = None,
+) -> logging.Logger:
     """
     Create and configure the root logger.
 
@@ -27,10 +33,6 @@ def setup_logger(name: str = "FishingBot", level: str = "INFO") -> logging.Logge
 
     logger = logging.getLogger(name)
     logger.setLevel(numeric_level)
-
-    # Avoid adding duplicate handlers on re-import
-    if logger.handlers:
-        return logger
 
     if HAS_COLORLOG:
         formatter = colorlog.ColoredFormatter(
@@ -50,9 +52,35 @@ def setup_logger(name: str = "FishingBot", level: str = "INFO") -> logging.Logge
             datefmt="%H:%M:%S",
         )
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    # Console handler (single instance)
+    has_console = any(
+        isinstance(h, logging.StreamHandler) and getattr(h, "_fishingbot_console", False)
+        for h in logger.handlers
+    )
+    if not has_console:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(formatter)
+        handler._fishingbot_console = True  # type: ignore[attr-defined]
+        logger.addHandler(handler)
+
+    # Optional file handler (single instance per file path)
+    if log_file is not None:
+        log_file = Path(log_file)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        normalized = str(log_file.resolve())
+        has_file = any(
+            isinstance(h, logging.FileHandler)
+            and str(Path(h.baseFilename).resolve()) == normalized
+            for h in logger.handlers
+        )
+        if not has_file:
+            file_formatter = logging.Formatter(
+                "%(asctime)s [%(levelname)-8s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setFormatter(file_formatter)
+            logger.addHandler(file_handler)
 
     return logger
 

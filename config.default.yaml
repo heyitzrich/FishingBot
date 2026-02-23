@@ -1,0 +1,65 @@
+game:
+  process_name: WowClassic
+  cast_key: '4'
+  ten_min_keys:
+  - '5'
+  - '6'
+detection:
+  mode: red
+  red:
+    lower1:
+    - 0
+    - 120
+    - 100
+    upper1:
+    - 10
+    - 255
+    - 255
+    lower2:
+    - 170
+    - 120
+    - 100
+    upper2:
+    - 180
+    - 255
+    - 255
+  blue:
+    lower:
+    - 100
+    - 120
+    - 100
+    upper:
+    - 130
+    - 255
+    - 255
+    blue_channel_min_delta: 20
+  template_fallback:
+    enabled: true
+    template_path: templates/bobber_blue.png
+    match_threshold: 0.84
+    capture_size_px: 84
+  search_region:
+    left_frac: 0.25
+    top_frac: 0.25
+    width_frac: 0.5
+    height_frac: 0.45
+  min_cluster_pixels: 3
+  max_total_pixels: 1000
+  cluster_radius: 10
+bite:
+  strike_value: 5
+  timeout_seconds: 25.0
+  position_update_ms: 50
+timing:
+  post_cast_wait_ms: 2000
+  loot_delay_ms: 500
+  post_loot_wait_ms: 2500
+  ten_min_interval_min: 10.0
+  macro_1_wait_s: 6.0
+  macro_2_wait_s: 6.0
+  macro_default_wait_s: 1.0
+  random_jitter_ms: 225
+debug:
+  show_window: true
+  window_refresh_ms: 100
+  log_level: INFO

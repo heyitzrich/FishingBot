@@ -242,7 +242,7 @@ class App(ctk.CTk):
     def _get_preview_frame(self):
         if self._finder is None or self._finder.last_frame is None:
             return None
-        # Raw captured preview with only a minimal detection marker.
+        # Raw captured preview with color-coded detection marker.
         frame = self._finder.last_frame.copy()
         bmp_pos = self._finder.last_bitmap_pos
         if bmp_pos is not None:
@@ -253,7 +253,19 @@ class App(ctk.CTk):
             y1 = max(0, cy - half)
             x2 = min(w - 1, cx + half)
             y2 = min(h - 1, cy + half)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2, cv2.LINE_AA)
+
+            # Color-code based on detection method (BGR format)
+            detection_method = self._finder.last_detection_method
+            if detection_method == 'template':
+                color = (0, 255, 0)  # Green for template matching
+            elif detection_method == 'red':
+                color = (0, 0, 255)  # Red for red pixel detection
+            elif detection_method == 'blue':
+                color = (255, 0, 0)  # Blue for blue pixel detection
+            else:
+                color = (255, 255, 255)  # White as fallback
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
         return frame
 
     def _drain_logs(self) -> None:

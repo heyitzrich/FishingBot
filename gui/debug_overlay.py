@@ -39,14 +39,25 @@ def build_debug_frame(bot: FishBot, finder: BobberFinder) -> Optional[np.ndarray
     overlay[mask > 0] = (0, 0, 180)  # red in BGR
     cv2.addWeighted(overlay, 0.35, display, 1.0, 0, display)
 
-    # Bobber reticle.
+    # Bobber reticle with color-coded detection method.
     bmp_pos = finder.last_bitmap_pos
+    detection_method = finder.last_detection_method
+
     if bmp_pos is not None:
         cx, cy = bmp_pos
         arm = 20
         stub = 8
         thickness = 2
-        color = (255, 255, 255)
+
+        # Color-code based on detection method (BGR format)
+        if detection_method == 'template':
+            color = (0, 255, 0)  # Green for template matching
+        elif detection_method == 'red':
+            color = (0, 0, 255)  # Red for red pixel detection
+        elif detection_method == 'blue':
+            color = (255, 0, 0)  # Blue for blue pixel detection
+        else:
+            color = (255, 255, 255)  # White as fallback
 
         for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
             x, y = cx + dx * arm, cy + dy * arm

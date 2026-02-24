@@ -98,6 +98,8 @@ class BobberFinder:
         self._last_bmp_pos: Optional[Tuple[int, int]] = None
         self._last_frame: Optional[np.ndarray] = None
         self._last_mask: Optional[np.ndarray] = None
+        self._last_detection_method: Optional[str] = None  # 'template', 'red', or 'blue'
+        self._last_successful_method: Optional[str] = None  # Persists across resets for display
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,6 +129,7 @@ class BobberFinder:
             template_fallback = self._find_with_template(frame)
             if template_fallback is not None:
                 self._last_bmp_pos = template_fallback
+                self._set_detection_method('template', 'fallback')
                 self._warn_if_slow(t0)
                 return bitmap_to_screen_coords(
                     template_fallback[0], template_fallback[1], self._region
@@ -135,6 +138,7 @@ class BobberFinder:
             template_first = self._find_with_template(frame)
             if template_first is not None:
                 self._last_bmp_pos = template_first
+                self._set_detection_method('template', 'template first')
                 self._warn_if_slow(t0)
                 return bitmap_to_screen_coords(
                     template_first[0], template_first[1], self._region
@@ -153,18 +157,22 @@ class BobberFinder:
             template_fallback = self._find_with_template(frame)
             if template_fallback is not None:
                 self._last_bmp_pos = template_fallback
+                self._set_detection_method('template', 'fallback')
                 self._warn_if_slow(t0)
                 return bitmap_to_screen_coords(
                     template_fallback[0], template_fallback[1], self._region
                 )
 
         self._last_bmp_pos = None
+        self._last_detection_method = None
         self._warn_if_slow(t0)
         return None
 
     def reset(self) -> None:
-        """Clear the cached position before a new cast."""
+        """Clear the cached position before a new cast.
+        Note: _last_successful_method persists for display purposes."""
         self._last_bmp_pos = None
+        self._last_detection_method = None
 
     @property
     def last_bitmap_pos(self) -> Optional[Tuple[int, int]]:
@@ -181,9 +189,29 @@ class BobberFinder:
         """Most recently computed binary mask (for debug display)."""
         return self._last_mask
 
+    @property
+    def last_detection_method(self) -> Optional[str]:
+        """Detection method used for the last successful find ('template', 'red', or 'blue').
+        This persists across resets for display purposes."""
+        return self._last_successful_method
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _set_detection_method(self, method: str, context: str = "") -> None:
+        """
+        Set the detection method and log only if it changed.
+
+        Args:
+            method: The detection method ('template', 'red', or 'blue')
+            context: Optional context string for the log message
+        """
+        if self._last_detection_method != method:
+            self._last_detection_method = method
+            self._last_successful_method = method
+            context_str = f" ({context})" if context else ""
+            logger.info("Detection method: %s%s", method, context_str)
 
     def _warn_if_slow(self, started_at: float) -> None:
         elapsed_ms = (time.perf_counter() - started_at) * 1000
@@ -263,6 +291,7 @@ class BobberFinder:
 
         result = self._find_with_color_mask(mask, self._primary_mode)
         if result is not None:
+            self._set_detection_method(self._primary_mode, 'primary color')
             return result
 
         if self._auto_mode_fallback and self._alt_classifier is not None and self._alt_mode:
@@ -270,6 +299,7 @@ class BobberFinder:
             alt_result = self._find_with_color_mask(alt_mask, self._alt_mode)
             if alt_result is not None:
                 self._last_mask = alt_mask
+                self._set_detection_method(self._alt_mode, 'fallback color')
                 if not self._auto_mode_warned:
                     logger.warning(
                         "Configured detection.mode='%s' did not lock bobber, but '%s' did. "

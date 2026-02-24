@@ -51,6 +51,16 @@ class PixelClassifier:
         self._cfg = cfg
         self._ranges: List[HsvRange] = self._build_ranges(cfg)
         self._blue_min_delta: int = int(cfg.get("blue", {}).get("blue_channel_min_delta", 20))
+        red_cfg = cfg.get("red", {}) if isinstance(cfg.get("red"), dict) else {}
+        # Optional red-mode hardening inspired by FishingFun:
+        #   - (r * colour_multiplier) > g and (r * colour_multiplier) > b
+        #   - g and b are "reasonably close"
+        # Set multipliers to 0 to disable (HSV-only behavior).
+        self._red_colour_multiplier: float = float(red_cfg.get("colour_multiplier", 0.0) or 0.0)
+        self._red_closeness_multiplier: float = float(
+            red_cfg.get("colour_closeness_multiplier", 0.0) or 0.0
+        )
+        self._red_closeness_offset: int = int(red_cfg.get("colour_closeness_offset", 20))
         self._red_ranges: Optional[List[HsvRange]] = None
         if self.mode == ClassifierMode.BLUE:
             red_cfg = cfg["red"]
@@ -103,6 +113,31 @@ class PixelClassifier:
             combined = combined.copy()
             combined[~dominant_blue] = 0
 
+        # Red mode hardening (optional):
+        # Helps reject warm UI/landscape reds that pass the hue threshold.
+        if self.mode == ClassifierMode.RED and (
+            self._red_colour_multiplier > 0.0 or self._red_closeness_multiplier > 0.0
+        ):
+            b = bgr_frame[:, :, 0].astype(np.int16)
+            g = bgr_frame[:, :, 1].astype(np.int16)
+            r = bgr_frame[:, :, 2].astype(np.int16)
+
+            keep = np.ones(bgr_frame.shape[:2], dtype=bool)
+            if self._red_colour_multiplier > 0.0:
+                rm = float(self._red_colour_multiplier)
+                keep &= (r.astype(np.float32) * rm) > g
+                keep &= (r.astype(np.float32) * rm) > b
+
+            if self._red_closeness_multiplier > 0.0:
+                cm = float(self._red_closeness_multiplier)
+                offset = int(self._red_closeness_offset)
+                max_gb = np.maximum(g, b).astype(np.float32)
+                min_gb = np.minimum(g, b).astype(np.float32)
+                keep &= (min_gb * cm) > (max_gb - float(offset))
+
+            combined = combined.copy()
+            combined[~keep] = 0
+
         return combined
 
     def is_match(self, r: int, g: int, b: int) -> bool:
@@ -127,10 +162,50 @@ class PixelClassifier:
                     ):
                         return False
 
+        if self.mode == ClassifierMode.RED and (
+            self._red_colour_multiplier > 0.0 or self._red_closeness_multiplier > 0.0
+        ):
+            if self._red_colour_multiplier > 0.0:
+                if (float(r) * float(self._red_colour_multiplier)) <= float(g):
+                    return False
+                if (float(r) * float(self._red_colour_multiplier)) <= float(b):
+                    return False
+            if self._red_closeness_multiplier > 0.0:
+                mx = max(int(g), int(b))
+                mn = min(int(g), int(b))
+                if (float(mn) * float(self._red_closeness_multiplier)) <= (
+                    float(mx) - float(self._red_closeness_offset)
+                ):
+                    return False
+
         for lower, upper in self._ranges:
             if lower[0] <= h <= upper[0] and lower[1] <= s <= upper[1] and lower[2] <= v <= upper[2]:
                 return True
         return False
+
+    def update_ranges(self, cfg: dict) -> None:
+        """
+        Rebuild HSV ranges and hardening parameters from an updated config.
+
+        Allows live tuning from the GUI without recreating the classifier.
+        """
+        self._cfg = cfg
+        self._ranges = self._build_ranges(cfg)
+        self._blue_min_delta = int(cfg.get("blue", {}).get("blue_channel_min_delta", 20))
+        red_cfg = cfg.get("red", {}) if isinstance(cfg.get("red"), dict) else {}
+        self._red_colour_multiplier = float(red_cfg.get("colour_multiplier", 0.0) or 0.0)
+        self._red_closeness_multiplier = float(
+            red_cfg.get("colour_closeness_multiplier", 0.0) or 0.0
+        )
+        self._red_closeness_offset = int(red_cfg.get("colour_closeness_offset", 20))
+        if self.mode == ClassifierMode.BLUE:
+            full_cfg_red = cfg.get("red", {})
+            if "lower1" in full_cfg_red:
+                self._red_ranges = [
+                    (full_cfg_red["lower1"], full_cfg_red["upper1"]),
+                    (full_cfg_red["lower2"], full_cfg_red["upper2"]),
+                ]
+        logger.debug(f"PixelClassifier ranges updated: {self._ranges}")
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -58,7 +58,6 @@ class ConfigEditorFrame(ctk.CTkFrame):
         }
 
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
             self,
@@ -67,43 +66,39 @@ class ConfigEditorFrame(ctk.CTkFrame):
             anchor="w",
         ).grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 8))
 
-        self.scroll = ctk.CTkScrollableFrame(self)
-        self.scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        self.scroll.grid_columnconfigure(1, weight=1)
+        # Fields container (no scroll needed — only 6 fields)
+        fields = ctk.CTkFrame(self, fg_color="transparent")
+        fields.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        fields.grid_columnconfigure(1, weight=1)
 
         row = 0
-        self._add_entry(row, "Cast Key", "game.cast_key")
-        row += 1
-        self._add_entry(row, "Macro 1", "game.macro_1")
-        row += 1
-        self._add_entry(row, "Macro 2", "game.macro_2")
-        row += 1
+        self._add_entry(fields, row, "Cast Key", "game.cast_key"); row += 1
+        self._add_entry(fields, row, "Macro 1", "game.macro_1"); row += 1
+        self._add_entry(fields, row, "Macro 2", "game.macro_2"); row += 1
         self._add_option_menu(
-            row, "Detection Mode", "detection.mode", values=["red", "blue"]
-        )
-        row += 1
-        self._add_entry(row, "Loot Delay (ms)", "timing.loot_delay_ms")
-        row += 1
-        self._add_entry(row, "Macro Interval (min)", "timing.ten_min_interval_min")
+            fields, row, "Detection Mode", "detection.mode", values=["red", "blue"]
+        ); row += 1
+        self._add_entry(fields, row, "Loot Delay (ms)", "timing.loot_delay_ms"); row += 1
+        self._add_entry(fields, row, "Macro Interval (min)", "timing.ten_min_interval_min")
 
         self._status = ctk.CTkLabel(self, text="", anchor="w")
-        self._status.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 6))
+        self._status.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
 
         self.save_button = ctk.CTkButton(self, text="Save Config", command=self._handle_save)
         self.save_button.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
 
-    def _add_entry(self, row: int, label: str, key: str) -> None:
-        ctk.CTkLabel(self.scroll, text=label, anchor="w").grid(
+    def _add_entry(self, parent, row: int, label: str, key: str) -> None:
+        ctk.CTkLabel(parent, text=label, anchor="w").grid(
             row=row, column=0, sticky="w", padx=(4, 8), pady=4
         )
-        widget = ctk.CTkEntry(self.scroll, textvariable=self._vars[key])
+        widget = ctk.CTkEntry(parent, textvariable=self._vars[key])
         widget.grid(row=row, column=1, sticky="ew", padx=(0, 4), pady=4)
 
-    def _add_option_menu(self, row: int, label: str, key: str, values: list[str]) -> None:
-        ctk.CTkLabel(self.scroll, text=label, anchor="w").grid(
+    def _add_option_menu(self, parent, row: int, label: str, key: str, values: list[str]) -> None:
+        ctk.CTkLabel(parent, text=label, anchor="w").grid(
             row=row, column=0, sticky="w", padx=(4, 8), pady=4
         )
-        widget = ctk.CTkOptionMenu(self.scroll, values=values, variable=self._vars[key])
+        widget = ctk.CTkOptionMenu(parent, values=values, variable=self._vars[key])
         widget.grid(row=row, column=1, sticky="ew", padx=(0, 4), pady=4)
 
     def load_config(self, cfg: Dict[str, Any]) -> None:

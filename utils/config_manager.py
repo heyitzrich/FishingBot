@@ -141,6 +141,16 @@ def validate_config(cfg: Dict[str, Any]) -> None:
         )
     _require_bool(detection, "auto_mode_fallback")
 
+    red = detection.get("red")
+    if not isinstance(red, dict):
+        raise ConfigError("Missing or invalid 'detection.red' section in config.")
+    for key in ("colour_multiplier", "colour_closeness_multiplier", "colour_closeness_offset"):
+        val = red.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, (int, float)):
+            raise ConfigError(f"'detection.red.{key}' must be a number (or null).")
+
     search_region = _require_section(detection, "search_region")
     for name in ("left_frac", "top_frac", "width_frac", "height_frac"):
         val = _require_number(search_region, name, min_value=0.0)
@@ -149,7 +159,27 @@ def validate_config(cfg: Dict[str, Any]) -> None:
 
     _require_number(detection, "min_cluster_pixels", min_value=1.0)
     _require_number(detection, "max_total_pixels", min_value=1.0)
+    max_component = detection.get("max_component_pixels")
+    if max_component is not None:
+        if not isinstance(max_component, (int, float)):
+            raise ConfigError("'detection.max_component_pixels' must be a number (or null).")
+        if float(max_component) < 1:
+            raise ConfigError("'detection.max_component_pixels' must be >= 1.")
+
     _require_number(detection, "cluster_radius", min_value=1.0)
+
+    post = detection.get("mask_postprocess")
+    if post is not None:
+        if not isinstance(post, dict):
+            raise ConfigError("'detection.mask_postprocess' must be a mapping (or null).")
+        for key in ("median_blur_ksize", "open_ksize", "close_ksize"):
+            val = post.get(key)
+            if val is None:
+                continue
+            if not isinstance(val, (int, float)):
+                raise ConfigError(f"'detection.mask_postprocess.{key}' must be a number (or null).")
+            if float(val) < 0:
+                raise ConfigError(f"'detection.mask_postprocess.{key}' must be >= 0.")
 
     _require_number(bite, "strike_value", min_value=1.0)
     _require_number(bite, "timeout_seconds", min_value=1.0)
@@ -176,6 +206,8 @@ def resolve_runtime_paths(cfg: Dict[str, Any], config_path: Path) -> Dict[str, A
     Current behavior:
       - detection.template_fallback.template_path is made absolute using the
         config directory when it is relative.
+      - detection.template_fallback.template_paths.{red,blue} are made absolute
+        using the config directory when they are relative.
     """
     detection = cfg.get("detection")
     if not isinstance(detection, dict):
@@ -186,13 +218,22 @@ def resolve_runtime_paths(cfg: Dict[str, Any], config_path: Path) -> Dict[str, A
         return cfg
 
     template_path_raw = template_cfg.get("template_path")
-    if not isinstance(template_path_raw, str) or not template_path_raw.strip():
-        return cfg
+    if isinstance(template_path_raw, str) and template_path_raw.strip():
+        template_path = Path(template_path_raw)
+        if not template_path.is_absolute():
+            template_path = (config_path.parent / template_path).resolve()
+        template_cfg["template_path"] = str(template_path)
 
-    template_path = Path(template_path_raw)
-    if not template_path.is_absolute():
-        template_path = (config_path.parent / template_path).resolve()
-    template_cfg["template_path"] = str(template_path)
+    template_paths = template_cfg.get("template_paths") or template_cfg.get("templates")
+    if isinstance(template_paths, dict):
+        for key in ("red", "blue"):
+            raw = template_paths.get(key)
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            path = Path(raw)
+            if not path.is_absolute():
+                path = (config_path.parent / path).resolve()
+            template_paths[key] = str(path)
     return cfg
 
 

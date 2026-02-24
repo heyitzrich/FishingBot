@@ -48,12 +48,22 @@ class BobberFinder:
         self._region = region
         self._min_pixels: int = cfg["min_cluster_pixels"]
         self._max_pixels: int = cfg["max_total_pixels"]
+        self._max_component_pixels: int = int(cfg.get("max_component_pixels", self._max_pixels))
         self._detector_order: str = str(
             cfg.get("detector_order", "template_first")
         ).strip().lower()
 
+        post_cfg = cfg.get("mask_postprocess") or {}
+        if not isinstance(post_cfg, dict):
+            post_cfg = {}
+        self._mask_median_ksize: int = int(post_cfg.get("median_blur_ksize", 0) or 0)
+        self._mask_open_ksize: int = int(post_cfg.get("open_ksize", 0) or 0)
+        self._mask_close_ksize: int = int(post_cfg.get("close_ksize", 0) or 0)
+
         self._primary_mode: str = classifier.mode.value
-        self._auto_mode_fallback: bool = bool(cfg.get("auto_mode_fallback", True))
+        # If enabled, allows opposite-color detection when the configured mode misses.
+        # Default to False to keep detection strict to the selected mode.
+        self._auto_mode_fallback: bool = bool(cfg.get("auto_mode_fallback", False))
         self._auto_mode_warned = False
         self._alt_classifier: Optional[PixelClassifier] = None
         self._alt_mode: Optional[str] = None
@@ -195,6 +205,11 @@ class BobberFinder:
         This persists across resets for display purposes."""
         return self._last_successful_method
 
+    @property
+    def classifier(self) -> PixelClassifier:
+        """Primary pixel classifier (for live tuning)."""
+        return self._classifier
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -218,49 +233,102 @@ class BobberFinder:
         if elapsed_ms > 200:
             logger.warning("BobberFinder scan took %.0fms (threshold: 200ms)", elapsed_ms)
 
+    def _postprocess_mask(self, mask: np.ndarray) -> np.ndarray:
+        """Optional morphological cleanup to improve cluster stability."""
+        out = mask
+
+        k = int(self._mask_median_ksize or 0)
+        if k >= 3:
+            if k % 2 == 0:
+                k += 1
+            out = cv2.medianBlur(out, k)
+
+        k_open = int(self._mask_open_ksize or 0)
+        if k_open >= 3:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_open, k_open))
+            out = cv2.morphologyEx(out, cv2.MORPH_OPEN, kernel)
+
+        k_close = int(self._mask_close_ksize or 0)
+        if k_close >= 3:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close))
+            out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel)
+
+        return out
+
     def _load_template(self, cfg: dict) -> None:
         """Load template image for optional matchTemplate fallback."""
         if not self._template_enabled:
             return
 
         template_cfg = cfg.get("template_fallback", {})
-        template_path_raw = str(template_cfg.get("template_path", "")).strip()
-        if not template_path_raw:
+        candidates: list[str] = []
+        template_paths = template_cfg.get("template_paths") or template_cfg.get("templates")
+        if isinstance(template_paths, dict):
+            mode_specific = str(template_paths.get(self._primary_mode, "")).strip()
+            if mode_specific:
+                candidates.append(mode_specific)
+
+        single = str(template_cfg.get("template_path", "")).strip()
+        if single and single not in candidates:
+            candidates.append(single)
+
+        if not candidates:
             logger.warning(
-                "Template fallback enabled but no template_path was provided; "
+                "Template fallback enabled but no template_path/template_paths was provided; "
                 "fallback is disabled."
             )
             self._template_enabled = False
             return
 
-        template_path = Path(template_path_raw)
-        if not template_path.is_absolute():
-            template_path = Path.cwd() / template_path
+        loaded_path: Optional[Path] = None
+        loaded_tpl: Optional[np.ndarray] = None
+        for raw in candidates:
+            template_path = Path(raw)
+            if not template_path.is_absolute():
+                template_path = Path.cwd() / template_path
+            if not template_path.exists():
+                continue
+            tpl = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+            if tpl is None or tpl.size == 0:
+                continue
+            loaded_path = template_path
+            loaded_tpl = tpl
+            break
 
-        if not template_path.exists():
+        if loaded_path is None or loaded_tpl is None:
             logger.warning(
-                "Template fallback image not found: %s. Fallback is disabled.",
-                template_path,
+                "Template fallback enabled, but none of the configured templates could be loaded. "
+                "Checked: %s. Fallback is disabled.",
+                ", ".join(candidates),
             )
             self._template_enabled = False
             return
 
-        tpl = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
-        if tpl is None or tpl.size == 0:
-            logger.warning(
-                "Template fallback failed to load image: %s. Fallback is disabled.",
-                template_path,
-            )
-            self._template_enabled = False
-            return
-
-        self._template_bgr = tpl
-        self._template_shape = tpl.shape[:2]
+        self._template_bgr = loaded_tpl
+        self._template_shape = loaded_tpl.shape[:2]
         logger.info(
             "Template fallback loaded: %s (threshold=%.2f)",
-            template_path,
+            loaded_path,
             self._template_threshold,
         )
+
+    def _restrict_frame_to_last(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, int, int]:
+        """
+        If we have a cached bobber position, crop the frame to a radius around it.
+        Returns (cropped_frame, x_offset, y_offset).
+        """
+        if self._last_bmp_pos is None:
+            return frame_bgr, 0, 0
+
+        lx, ly = self._last_bmp_pos
+        r = self._track_radius
+        h, w = frame_bgr.shape[:2]
+
+        x1, y1 = max(0, lx - r), max(0, ly - r)
+        x2, y2 = min(w, lx + r), min(h, ly + r)
+        if (x2 - x1) < 2 or (y2 - y1) < 2:
+            return frame_bgr, 0, 0
+        return frame_bgr[y1:y2, x1:x2], x1, y1
 
     def _restrict_to_last(self, mask: np.ndarray) -> np.ndarray:
         """
@@ -286,7 +354,7 @@ class BobberFinder:
 
     def _find_with_color_modes(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int]]:
         """Try primary color mode, then optional opposite color fallback mode."""
-        mask = self._classifier.apply_mask(frame_bgr)
+        mask = self._postprocess_mask(self._classifier.apply_mask(frame_bgr))
         self._last_mask = mask
 
         result = self._find_with_color_mask(mask, self._primary_mode)
@@ -295,7 +363,7 @@ class BobberFinder:
             return result
 
         if self._auto_mode_fallback and self._alt_classifier is not None and self._alt_mode:
-            alt_mask = self._alt_classifier.apply_mask(frame_bgr)
+            alt_mask = self._postprocess_mask(self._alt_classifier.apply_mask(frame_bgr))
             alt_result = self._find_with_color_mask(alt_mask, self._alt_mode)
             if alt_result is not None:
                 self._last_mask = alt_mask
@@ -327,7 +395,9 @@ class BobberFinder:
                 mode_name,
                 total,
             )
-            return None
+            # If the whole frame is lit up, connected-components becomes unreliable.
+            if total > (self._max_pixels * 12):
+                return None
 
         return self._find_best_component(search_mask)
 
@@ -339,8 +409,10 @@ class BobberFinder:
         if not self._template_enabled or self._template_bgr is None or self._template_shape is None:
             return None
 
+        search_frame, x_off, y_off = self._restrict_frame_to_last(frame_bgr)
+
         t_h, t_w = self._template_shape
-        f_h, f_w = frame_bgr.shape[:2]
+        f_h, f_w = search_frame.shape[:2]
         if t_h > f_h or t_w > f_w:
             if not self._template_warned:
                 logger.warning(
@@ -351,13 +423,13 @@ class BobberFinder:
             return None
 
         # Full-color template match so feather+bob colors contribute to confidence.
-        result = cv2.matchTemplate(frame_bgr, self._template_bgr, cv2.TM_CCOEFF_NORMED)
+        result = cv2.matchTemplate(search_frame, self._template_bgr, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
         if max_val < self._template_threshold:
             return None
 
-        center_x = int(max_loc[0] + t_w / 2)
-        center_y = int(max_loc[1] + t_h / 2)
+        center_x = int(x_off + max_loc[0] + t_w / 2)
+        center_y = int(y_off + max_loc[1] + t_h / 2)
         logger.debug(
             "Template fallback matched at bitmap (%s, %s), score=%.3f",
             center_x,
@@ -389,6 +461,8 @@ class BobberFinder:
         for label in range(1, num_labels):  # label 0 = background
             area = int(stats[label, cv2.CC_STAT_AREA])
             if area < min_area:
+                continue
+            if area > self._max_component_pixels:
                 continue
 
             score = float(area)

@@ -5,9 +5,15 @@ game:
   - '5'
   - '6'
 detection:
-  detector_order: template_first
+  detector_order: color_first
   mode: red
-  auto_mode_fallback: true
+  auto_mode_fallback: false
+  # Optional cleanup to make color blobs less noisy and more stable.
+  # Set any *_ksize to 0 to disable that operation.
+  mask_postprocess:
+    median_blur_ksize: 0
+    open_ksize: 0
+    close_ksize: 3
   initial_lock_min_cluster_pixels: 8
   initial_lock_center_penalty: 12.0
   initial_lock_target_y_frac: 0.42
@@ -29,6 +35,13 @@ detection:
     - 180
     - 255
     - 255
+    # Optional extra hardening (HSV-only when set to 0).
+    # If enabled, requires:
+    #   (r * colour_multiplier) > g and (r * colour_multiplier) > b
+    # and optionally keeps only pixels where g and b are reasonably close.
+    colour_multiplier: 0.0
+    colour_closeness_multiplier: 0.0
+    colour_closeness_offset: 20
   blue:
     lower:
     - 100
@@ -41,6 +54,11 @@ detection:
     blue_channel_min_delta: 20
   template_fallback:
     enabled: true
+    # Mode-specific templates (preferred). You can capture these from the GUI.
+    template_paths:
+      red: templates/my_bobber.png
+      blue: templates/bobber_blue.png
+    # Back-compat single-template setting (used if template_paths is missing/empty).
     template_path: templates/my_bobber.png
     match_threshold: 0.84
     capture_size_px: 84
@@ -51,6 +69,8 @@ detection:
     height_frac: 0.45
   min_cluster_pixels: 3
   max_total_pixels: 1000
+  # Skip components larger than this (helps when the mask matches large UI/water areas).
+  max_component_pixels: 1000
   cluster_radius: 10
 bite:
   strike_value: 5

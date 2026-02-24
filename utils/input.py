@@ -118,14 +118,16 @@ def right_click(hwnd: int, screen_x: int, screen_y: int, jitter_ms: int = 225) -
     client_x, client_y = win32gui.ScreenToClient(hwnd, (screen_x, screen_y))
     l_param = win32api.MAKELONG(client_x, client_y)
 
-    # Move WoW's internal cursor to the bobber position
-    win32api.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, l_param)
+    # Move WoW's internal cursor to the bobber position.
+    # Use SendMessage (synchronous) so WoW processes the hover before the click,
+    # preventing the user's real mouse movement from interfering.
+    win32gui.SendMessage(hwnd, win32con.WM_MOUSEMOVE, 0, l_param)
     time.sleep(0.05)
 
-    # Right-click at that position
-    win32api.PostMessage(hwnd, win32con.WM_RBUTTONDOWN, win32con.MK_RBUTTON, l_param)
+    # Right-click at that position (synchronous to avoid race with real mouse)
+    win32gui.SendMessage(hwnd, win32con.WM_RBUTTONDOWN, win32con.MK_RBUTTON, l_param)
     time.sleep(random.uniform(0.05, 0.1))
-    win32api.PostMessage(hwnd, win32con.WM_RBUTTONUP, 0, l_param)
+    win32gui.SendMessage(hwnd, win32con.WM_RBUTTONUP, 0, l_param)
 
     if jitter_ms > 0:
         time.sleep(random.uniform(0.0, jitter_ms / 1000.0))

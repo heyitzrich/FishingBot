@@ -258,12 +258,14 @@ class FishBot:
             if self._watcher.update(pos[1]):
                 # Check if the drop was too large (>= 100px = false positive)
                 drop = self._watcher.detected_drop
+                method = self._watcher.detection_method
                 if drop >= 100.0:
                     logger.warning(
                         f"Bite detected but drop too large ({drop:.1f}px >= 100px) — "
-                        f"treating as false positive/miss"
+                        f"treating as false positive/miss (method: {method})"
                     )
                     return WatchResult.BITE_TOO_LARGE
+                logger.info(f"Valid bite confirmed: {method}")
                 return WatchResult.BITE_DETECTED
 
             time.sleep(0.033)   # ~30 fps polling rate

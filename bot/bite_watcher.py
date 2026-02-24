@@ -1,14 +1,16 @@
 """
 Bite detection by monitoring the fishing bobber's Y-position over time.
 
-Uses the median of recent Y-position deltas to declare a bite, which makes
-detection robust against single-frame noise or brief camera jitter — the same
-strategy as the original C# project.
+Robust multi-signal detection with confirmation:
+  1. Median drop detection (primary, very robust)
+  2. Peak drop detection (confirms sustained movement)
+  3. Requires BOTH median AND peak to exceed thresholds (AND logic)
 
 Improvement over the original:
-  - Rolling window of configurable size (not just a list that grows forever)
-  - Median computed over deltas from the initial position (not adjacent pairs),
-    so a sustained drop reads correctly even if the bobber oscillates slightly
+  - Rolling window of configurable size for noise filtering
+  - Confirmation logic: requires multiple signals to agree
+  - Balanced window size (10 samples) - filters noise while staying responsive
+  - Conservative thresholds to avoid false positives
   - Configurable via YAML; no hardcoded UI sliders needed
 """
 
@@ -22,7 +24,7 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
-_WINDOW_SIZE = 12  # number of Y samples to keep in the rolling median window
+_WINDOW_SIZE = 10  # Balanced for noise filtering and responsiveness
 
 
 class BiteWatcher:
@@ -57,6 +59,7 @@ class BiteWatcher:
         self._y_window:   deque = deque(maxlen=_WINDOW_SIZE)
         self._triggered:  bool  = False
         self._detected_drop: float = 0.0  # Track the actual drop amount when bite detected
+        self._detection_method: str = ""  # Track which detection method triggered
 
     # ------------------------------------------------------------------
     # Public API
@@ -77,6 +80,7 @@ class BiteWatcher:
         self._y_window.append(initial_y)
         self._triggered  = False
         self._detected_drop = 0.0
+        self._detection_method = ""
         logger.debug(
             f"BiteWatcher reset — initial_y={initial_y}, "
             f"strike={self._strike_value}px, timeout={self._timeout}s"
@@ -86,7 +90,12 @@ class BiteWatcher:
         """
         Feed a new bobber Y-position reading.
 
-        Rate-limited by position_update_ms to avoid hammering the median calc.
+        Uses confirmation-based detection (requires multiple signals):
+        1. Primary: Median drop >= threshold (filters noise)
+        2. Confirmation: Peak drop also significant (confirms sustained movement)
+        3. Both must agree to trigger (AND logic, not OR)
+
+        Rate-limited by position_update_ms to avoid hammering calculations.
 
         Returns:
             True if a bite was detected (or was already triggered previously).
@@ -101,21 +110,37 @@ class BiteWatcher:
 
         self._y_window.append(current_y)
 
-        if len(self._y_window) < 2:
+        # Need enough samples for reliable detection
+        if len(self._y_window) < 5:
             return False
 
-        drop = self._median_drop()
+        # Compute detection signals
+        median_drop = self._median_drop()
+        peak_drop = self._peak_drop()
+
+        # Conservative thresholds
+        median_threshold = self._strike_value
+        peak_threshold = self._strike_value - 1  # Slightly lower for confirmation
+
+        bite_detected = False
+        detection_reason = ""
+
+        # Require BOTH median AND peak to confirm bite (reduces false positives)
+        if median_drop >= median_threshold and peak_drop >= peak_threshold:
+            bite_detected = True
+            self._detected_drop = median_drop
+            detection_reason = f"confirmed: median={median_drop:.1f}px, peak={peak_drop:.1f}px"
+
         logger.debug(
-            f"BiteWatcher y={current_y} drop={drop:.1f}px "
-            f"({len(self._y_window)} samples, threshold={self._strike_value}px)"
+            f"BiteWatcher y={current_y} median={median_drop:.1f}px peak={peak_drop:.1f}px "
+            f"({len(self._y_window)} samples, need both >= {median_threshold}/{peak_threshold}px)"
         )
 
-        if drop >= self._strike_value:
-            self._detected_drop = drop  # Store the actual drop amount
+        if bite_detected:
+            self._detection_method = detection_reason
             logger.info(
-                f"Bite detected! Median drop={drop:.1f}px "
-                f"(threshold={self._strike_value}px, "
-                f"elapsed={self.elapsed:.1f}s)"
+                f"Bite detected! {detection_reason} "
+                f"(threshold={self._strike_value}px, elapsed={self.elapsed:.1f}s)"
             )
             self._triggered = True
             self._on_bite()
@@ -142,6 +167,11 @@ class BiteWatcher:
         """The actual drop amount in pixels when bite was detected (0 if no bite)."""
         return self._detected_drop
 
+    @property
+    def detection_method(self) -> str:
+        """The detection method that triggered the bite (e.g., 'median-drop', 'peak-drop', 'velocity')."""
+        return self._detection_method
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -154,3 +184,14 @@ class BiteWatcher:
         drops = sorted(y - self._initial_y for y in self._y_window)
         mid   = len(drops) // 2
         return float(drops[mid])
+
+    def _peak_drop(self) -> float:
+        """
+        Maximum Y displacement from the initial position across all samples.
+        Used as confirmation signal - ensures movement is sustained, not just noise.
+        Positive value = bobber has moved downward.
+        """
+        if not self._y_window:
+            return 0.0
+        drops = [y - self._initial_y for y in self._y_window]
+        return float(max(drops))

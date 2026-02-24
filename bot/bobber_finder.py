@@ -110,6 +110,7 @@ class BobberFinder:
         self._last_mask: Optional[np.ndarray] = None
         self._last_detection_method: Optional[str] = None  # 'template', 'red', or 'blue'
         self._last_successful_method: Optional[str] = None  # Persists across resets for display
+        self._too_many_pixels_last_warn: float = 0.0  # Throttle warning spam
 
     # ------------------------------------------------------------------
     # Public API
@@ -390,11 +391,15 @@ class BobberFinder:
             return None
 
         if total > self._max_pixels:
-            logger.warning(
-                "Too many '%s' matching pixels (%s). Narrow HSV thresholds.",
-                mode_name,
-                total,
-            )
+            now = time.perf_counter()
+            if now - self._too_many_pixels_last_warn > 5.0:
+                logger.warning(
+                    "Too many '%s' matching pixels (%s > %s). Narrow HSV thresholds.",
+                    mode_name,
+                    total,
+                    self._max_pixels,
+                )
+                self._too_many_pixels_last_warn = now
             # If the whole frame is lit up, connected-components becomes unreliable.
             if total > (self._max_pixels * 12):
                 return None
